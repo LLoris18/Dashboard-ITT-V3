@@ -219,6 +219,11 @@
                 <!-- Materiale -->
                 <td class="px-4 py-2.5">
                   <span class="font-mono text-xs font-semibold text-gray-800">{{ line.material_code }}</span>
+                  <span v-if="line.corrected"
+                    class="ml-1.5 inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full align-middle"
+                    :title="`Codice originale nell'Excel: ${line.original_code}`">
+                    ↺ {{ line.original_code }}
+                  </span>
                 </td>
                 <!-- Prodotto -->
                 <td class="px-4 py-2.5">
@@ -264,7 +269,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useAuthStore } from '@/stores/auth.js'
-import { runVerification } from '@/api/odoo-service.js'
+import { runVerification, recheckMissingWithZeroVariants } from '@/api/odoo-service.js'
 
 const auth = useAuthStore()
 
@@ -318,7 +323,17 @@ async function runVerifica() {
   try {
     const b64 = await fileToBase64(selectedFile.value)
     const { uid, password } = auth.getCredentials()
-    results.value = await runVerification(uid, password, b64, selectedFile.value.name)
+    const verified = await runVerification(uid, password, b64, selectedFile.value.name)
+
+    // Fallback: per le righe non trovate, riprova con/senza lo zero iniziale nel
+    // codice materiale (errore di formattazione nell'import Excel dei prodotti).
+    try {
+      await recheckMissingWithZeroVariants(uid, password, verified)
+    } catch (e) {
+      console.warn('Recheck varianti zero non riuscito:', e)
+    }
+
+    results.value = { ...verified }
     tableFilter.value = 'all'
     search.value = ''
   } catch (err) {

@@ -303,6 +303,141 @@ export async function runVerification(uid, password, fileB64, filename = '') {
   )
 }
 
+/**
+ * Genera le varianti di un codice con/senza zero iniziale.
+ * Esempi:
+ *   '0802880725' -> ['802880725']   (codici con zeri davanti: provo senza)
+ *   '2880725'    -> ['02880725', '002880725']  (codici senza zero: provo aggiungendoli)
+ * Restituisce solo varianti diverse dal codice originale e non vuote.
+ */
+function zeroVariants(code) {
+  const c = String(code ?? '').trim()
+  if (!c) return []
+  const variants = new Set()
+  if (c.startsWith('0')) {
+    // Ha uno o più zeri davanti → provo a toglierli
+    variants.add(c.replace(/^0+/, '')) // tutti gli zeri iniziali
+    variants.add(c.replace(/^0/, ''))  // un solo zero iniziale
+  } else {
+    // Nessun zero davanti → provo ad aggiungerlo/i
+    variants.add('0' + c)
+    variants.add('00' + c)
+  }
+  variants.delete('')
+  variants.delete(c)
+  return [...variants]
+}
+
+/**
+ * Ricontrolla le righe "missing" della verifica provando varianti del codice
+ * materiale con/senza zero iniziale (errore di formattazione in import Excel).
+ *
+ * Per ogni riga mancante:
+ *   1. genera i codici alternativi (zero aggiunto/rimosso davanti)
+ *   2. cerca il prodotto con quel default_code su Odoo
+ *   3. verifica la disponibilità del lotto a magazzino CDP (stessa logica di fetchCdpLots)
+ *
+ * Le righe recuperate vengono aggiornate in-place: state 'ok', codice corretto,
+ * quantità e un flag `corrected` con il codice originale. I conteggi found/missing
+ * vengono ricalcolati. Eventuali errori non bloccano la verifica originale.
+ *
+ * @returns lo stesso oggetto results (mutato) — riassegnare la ref per reattività.
+ */
+export async function recheckMissingWithZeroVariants(uid, password, results) {
+  if (!results || !Array.isArray(results.lines)) return results
+
+  const missing = results.lines.filter(l => l.state !== 'ok')
+  if (missing.length === 0) return results
+
+  // 1. Mappa codice-alternativo -> righe che lo richiedono
+  const codeToLines = new Map()
+  for (const line of missing) {
+    for (const alt of zeroVariants(line.material_code)) {
+      if (!codeToLines.has(alt)) codeToLines.set(alt, [])
+      codeToLines.get(alt).push(line)
+    }
+  }
+  const altCodes = [...codeToLines.keys()]
+  if (altCodes.length === 0) return results
+
+  // 2. Cerca i prodotti con i codici alternativi
+  const products = await callModel(uid, password, 'product.product', 'search_read',
+    [[['default_code', 'in', altCodes]]],
+    { fields: ['id', 'name', 'default_code'] }
+  )
+  if (!products.length) return results
+
+  const codeToProduct = new Map()
+  for (const p of products) {
+    if (p.default_code) codeToProduct.set(String(p.default_code), p)
+  }
+  const productIds = products.map(p => p.id)
+
+  // 3. Giacenze CDP per quei prodotti (stessa strategia di fetchCdpLots)
+  const warehouses = await callModel(uid, password, 'stock.warehouse', 'search_read',
+    [[['code', '=', 'CDP']]],
+    { fields: ['id', 'view_location_id'], limit: 1 }
+  )
+  if (!warehouses.length) return results
+  const cdpRootName = warehouses[0].view_location_id[1]
+
+  const quants = await callModel(uid, password, 'stock.quant', 'search_read',
+    [[
+      ['location_id.complete_name', 'ilike', cdpRootName],
+      ['location_id.usage', '=', 'internal'],
+      ['product_id', 'in', productIds],
+      ['quantity', '>', 0],
+    ]],
+    { fields: ['product_id', 'lot_id', 'quantity'] }
+  )
+
+  // Indicizza la quantità disponibile per prodotto e per prodotto+lotto
+  const qtyByProduct = new Map()            // productId -> qty totale
+  const qtyByProductLot = new Map()         // productId -> Map(lotName -> qty)
+  for (const q of quants) {
+    const pid = q.product_id[0]
+    const qty = q.quantity || 0
+    qtyByProduct.set(pid, (qtyByProduct.get(pid) || 0) + qty)
+    if (q.lot_id) {
+      const lotName = String(q.lot_id[1]).trim()
+      if (!qtyByProductLot.has(pid)) qtyByProductLot.set(pid, new Map())
+      const m = qtyByProductLot.get(pid)
+      m.set(lotName, (m.get(lotName) || 0) + qty)
+    }
+  }
+
+  // 4. Recupera le righe se il codice alternativo ha giacenza
+  let recovered = 0
+  for (const [alt, lines] of codeToLines) {
+    const product = codeToProduct.get(alt)
+    if (!product) continue
+    for (const line of lines) {
+      if (line.state === 'ok') continue // già recuperata da un'altra variante
+      const wantedLot = String(line.lot_name || '').trim()
+      const qty = wantedLot
+        ? (qtyByProductLot.get(product.id)?.get(wantedLot) || 0)
+        : (qtyByProduct.get(product.id) || 0)
+      if (qty > 0) {
+        line.original_code = line.material_code
+        line.material_code = product.default_code
+        line.product_name  = product.name || line.product_name
+        line.qty_lot       = qty
+        line.state         = 'ok'
+        line.corrected     = true
+        line.message       = `Trovato correggendo il codice (${line.original_code} → ${product.default_code})`
+        recovered++
+      }
+    }
+  }
+
+  // 5. Ricalcola i conteggi
+  if (recovered > 0) {
+    results.found   = results.lines.filter(l => l.state === 'ok').length
+    results.missing = results.lines.length - results.found
+  }
+  return results
+}
+
 // ============================================================================
 // BOM — Distinte Base (warehouse.bom.line)
 // ============================================================================
