@@ -269,7 +269,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useAuthStore } from '@/stores/auth.js'
-import { runVerification, recheckMissingWithZeroVariants } from '@/api/odoo-service.js'
+import { runVerification, recheckMissingLots } from '@/api/odoo-service.js'
 
 const auth = useAuthStore()
 
@@ -325,12 +325,13 @@ async function runVerifica() {
     const { uid, password } = auth.getCredentials()
     const verified = await runVerification(uid, password, b64, selectedFile.value.name)
 
-    // Fallback: per le righe non trovate, riprova con/senza lo zero iniziale nel
+    // Fallback: per le righe non trovate, ricontrolla la giacenza in qualsiasi
+    // ubicazione interna, provando anche le varianti con/senza zero iniziale nel
     // codice materiale (errore di formattazione nell'import Excel dei prodotti).
     try {
-      await recheckMissingWithZeroVariants(uid, password, verified)
+      await recheckMissingLots(uid, password, verified)
     } catch (e) {
-      console.warn('Recheck varianti zero non riuscito:', e)
+      console.warn('Recheck lotti mancanti non riuscito:', e)
     }
 
     results.value = { ...verified }

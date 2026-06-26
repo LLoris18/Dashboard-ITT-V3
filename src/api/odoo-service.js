@@ -329,40 +329,41 @@ function zeroVariants(code) {
 }
 
 /**
- * Ricontrolla le righe "missing" della verifica provando varianti del codice
- * materiale con/senza zero iniziale (errore di formattazione in import Excel).
+ * Ricontrolla le righe "missing" della verifica.
  *
- * Per ogni riga mancante:
- *   1. genera i codici alternativi (zero aggiunto/rimosso davanti)
- *   2. cerca il prodotto con quel default_code su Odoo
- *   3. verifica la disponibilità del lotto a magazzino CDP (stessa logica di fetchCdpLots)
+ * Criterio di "presente": il lotto ha giacenza > 0 in una qualsiasi ubicazione
+ * INTERNA (stock.location.usage = 'internal'), non solo nel magazzino CDP.
  *
- * Le righe recuperate vengono aggiornate in-place: state 'ok', codice corretto,
- * quantità e un flag `corrected` con il codice originale. I conteggi found/missing
- * vengono ricalcolati. Eventuali errori non bloccano la verifica originale.
+ * Per ogni riga mancante prova a risolvere il prodotto sia con il codice originale
+ * sia con le varianti con/senza zero iniziale (errore di formattazione in import
+ * Excel), poi verifica la giacenza del lotto (confronto esatto sul numero lotto).
+ *
+ * Le righe recuperate vengono aggiornate in-place: state 'ok', quantità, e — solo
+ * se il match è avvenuto con un codice diverso dall'originale — `corrected` con il
+ * codice originale. I conteggi found/missing vengono ricalcolati. Eventuali errori
+ * non bloccano la verifica originale.
  *
  * @returns lo stesso oggetto results (mutato) — riassegnare la ref per reattività.
  */
-export async function recheckMissingWithZeroVariants(uid, password, results) {
+export async function recheckMissingLots(uid, password, results) {
   if (!results || !Array.isArray(results.lines)) return results
 
   const missing = results.lines.filter(l => l.state !== 'ok')
   if (missing.length === 0) return results
 
-  // 1. Mappa codice-alternativo -> righe che lo richiedono
-  const codeToLines = new Map()
-  for (const line of missing) {
-    for (const alt of zeroVariants(line.material_code)) {
-      if (!codeToLines.has(alt)) codeToLines.set(alt, [])
-      codeToLines.get(alt).push(line)
-    }
-  }
-  const altCodes = [...codeToLines.keys()]
-  if (altCodes.length === 0) return results
+  // 1. Candidati codice per ogni riga: originale + varianti zero (originale per primo)
+  const lineCandidates = missing.map(line => {
+    const orig = String(line.material_code ?? '').trim()
+    const codes = [orig, ...zeroVariants(line.material_code)].filter(Boolean)
+    return { line, orig, codes: [...new Set(codes)] }
+  })
 
-  // 2. Cerca i prodotti con i codici alternativi
+  const allCodes = [...new Set(lineCandidates.flatMap(c => c.codes))]
+  if (allCodes.length === 0) return results
+
+  // 2. Risolvi i prodotti per tutti i codici candidati
   const products = await callModel(uid, password, 'product.product', 'search_read',
-    [[['default_code', 'in', altCodes]]],
+    [[['default_code', 'in', allCodes]]],
     { fields: ['id', 'name', 'default_code'] }
   )
   if (!products.length) return results
@@ -371,19 +372,11 @@ export async function recheckMissingWithZeroVariants(uid, password, results) {
   for (const p of products) {
     if (p.default_code) codeToProduct.set(String(p.default_code), p)
   }
-  const productIds = products.map(p => p.id)
+  const productIds = [...new Set(products.map(p => p.id))]
 
-  // 3. Giacenze CDP per quei prodotti (stessa strategia di fetchCdpLots)
-  const warehouses = await callModel(uid, password, 'stock.warehouse', 'search_read',
-    [[['code', '=', 'CDP']]],
-    { fields: ['id', 'view_location_id'], limit: 1 }
-  )
-  if (!warehouses.length) return results
-  const cdpRootName = warehouses[0].view_location_id[1]
-
+  // 3. Giacenze > 0 in QUALSIASI ubicazione interna per quei prodotti
   const quants = await callModel(uid, password, 'stock.quant', 'search_read',
     [[
-      ['location_id.complete_name', 'ilike', cdpRootName],
       ['location_id.usage', '=', 'internal'],
       ['product_id', 'in', productIds],
       ['quantity', '>', 0],
@@ -391,9 +384,9 @@ export async function recheckMissingWithZeroVariants(uid, password, results) {
     { fields: ['product_id', 'lot_id', 'quantity'] }
   )
 
-  // Indicizza la quantità disponibile per prodotto e per prodotto+lotto
-  const qtyByProduct = new Map()            // productId -> qty totale
-  const qtyByProductLot = new Map()         // productId -> Map(lotName -> qty)
+  // Indicizza la quantità per prodotto e per prodotto+lotto
+  const qtyByProduct = new Map()      // productId -> qty totale
+  const qtyByProductLot = new Map()   // productId -> Map(lotName -> qty)
   for (const q of quants) {
     const pid = q.product_id[0]
     const qty = q.quantity || 0
@@ -406,27 +399,32 @@ export async function recheckMissingWithZeroVariants(uid, password, results) {
     }
   }
 
-  // 4. Recupera le righe se il codice alternativo ha giacenza
+  // 4. Recupera le righe con giacenza in ubicazione interna
   let recovered = 0
-  for (const [alt, lines] of codeToLines) {
-    const product = codeToProduct.get(alt)
-    if (!product) continue
-    for (const line of lines) {
-      if (line.state === 'ok') continue // già recuperata da un'altra variante
-      const wantedLot = String(line.lot_name || '').trim()
+  for (const { line, orig, codes } of lineCandidates) {
+    const wantedLot = String(line.lot_name || '').trim()
+    for (const code of codes) {              // originale per primo, poi varianti
+      const product = codeToProduct.get(code)
+      if (!product) continue
       const qty = wantedLot
         ? (qtyByProductLot.get(product.id)?.get(wantedLot) || 0)
         : (qtyByProduct.get(product.id) || 0)
-      if (qty > 0) {
+      if (qty <= 0) continue
+
+      const corrected = code !== orig
+      if (corrected) {
         line.original_code = line.material_code
         line.material_code = product.default_code
-        line.product_name  = product.name || line.product_name
-        line.qty_lot       = qty
-        line.state         = 'ok'
         line.corrected     = true
-        line.message       = `Trovato correggendo il codice (${line.original_code} → ${product.default_code})`
-        recovered++
       }
+      line.product_name = product.name || line.product_name
+      line.qty_lot      = qty
+      line.state        = 'ok'
+      line.message      = corrected
+        ? `Trovato correggendo il codice (${line.original_code} → ${product.default_code})`
+        : 'Trovato in ubicazione interna (giacenza > 0)'
+      recovered++
+      break
     }
   }
 
