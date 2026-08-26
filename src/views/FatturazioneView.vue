@@ -1231,7 +1231,7 @@
               <div class="col-span-2">
                 <label class="block text-xs font-medium text-slate-500 mb-1">Dichiarazione d'Intento ID</label>
                 <div class="flex gap-2">
-                  <input v-model.number="intentCfg.declaration_id" type="number" class="input-field flex-1" placeholder="es. 1"/>
+                  <input v-model.number="intentCfg.declaration_id" type="number" class="input-field flex-1" placeholder="es. 2"/>
                   <button @click="loadDeclarationsForPicker" class="btn-secondary text-xs px-2">↗</button>
                 </div>
                 <p v-if="intentCfg.declaration_id" class="text-xs text-emerald-600 mt-1">
@@ -1312,7 +1312,7 @@
               </div>
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-1">Dichiarazione ID</label>
-                <input v-model.number="logIntentCfg.declaration_id" type="number" class="input-field" placeholder="es. 1"/>
+                <input v-model.number="logIntentCfg.declaration_id" type="number" class="input-field" placeholder="es. 2"/>
               </div>
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-1">Tax IVA Dichiarazione ID</label>
@@ -1800,11 +1800,11 @@ async function loadInvoices() {
 // =============================================================
 const intentCfg = reactive({
   partner_id: 8, partner_bank_id: 1, payment_term_id: 9,
-  fiscal_position_id: 5, declaration_id: 1,
+  fiscal_position_id: 5, declaration_id: 2,
   tax_intent_id: 34, account_id: null,
   bollo_template_id: 27751, bollo_tax_id: 36,
   bollo_soglia: 77.46, bollo_price: 2.00,
-  nota_dichiarazione: "Riferimento alla Dichiarazione d'intento numero 2603311531351892 - 000004",
+  nota_dichiarazione: '',
   oda_prefixes_str: '40,57,44',
 })
 const intent = reactive({ file: null, sheets: [], parsing: false, creating: false, results: [] })
@@ -1937,11 +1937,11 @@ function declStateLabel(s) {
 // =============================================================
 const logIntentCfg = reactive({
   partner_id: 8, partner_bank_id: 1, payment_term_id: 9,
-  fiscal_position_id: 5, declaration_id: 1,
+  fiscal_position_id: 5, declaration_id: 2,
   tax_intent_id: 34, account_id: null,
   bollo_template_id: 27751, bollo_tax_id: 36,
   bollo_soglia: 77.46, bollo_price: 2.00,
-  nota_dichiarazione: "Riferimento alla Dichiarazione d'intento numero 2603311531351892 - 000004",
+  nota_dichiarazione: '',
 })
 const logIntent = reactive({ files: [], parsed: {}, parsing: false, creating: false, results: [] })
 
